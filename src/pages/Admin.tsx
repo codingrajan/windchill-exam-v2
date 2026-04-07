@@ -756,6 +756,27 @@ export default function Admin() {
     return () => unsubscribe();
   }, []);
 
+  // Auto-logout after 2 minutes of inactivity
+  useEffect(() => {
+    if (!isAuthenticated) return;
+
+    let timer: ReturnType<typeof setTimeout>;
+
+    const resetTimer = () => {
+      clearTimeout(timer);
+      timer = setTimeout(() => auth.signOut(), 120_000);
+    };
+
+    const events = ['mousemove', 'mousedown', 'keydown', 'touchstart', 'scroll', 'click'] as const;
+    events.forEach(evt => window.addEventListener(evt, resetTimer, { passive: true }));
+    resetTimer(); // arm immediately on login
+
+    return () => {
+      clearTimeout(timer);
+      events.forEach(evt => window.removeEventListener(evt, resetTimer));
+    };
+  }, [isAuthenticated]);
+
   const handleLogout = async () => {
     await auth.signOut();
   };

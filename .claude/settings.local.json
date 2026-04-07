@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cmd.exe /c \"if not exist C:\\\\Users\\\\RajanAgarwal\\\\windchill-exam-v2\\\\.claude mkdir C:\\\\Users\\\\RajanAgarwal\\\\windchill-exam-v2\\\\.claude\")",
+      "mcp__Claude_Preview__preview_start"
+    ]
+  }
+}
