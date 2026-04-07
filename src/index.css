@@ -1,0 +1,21 @@
+@import "tailwindcss";
+
+@theme {
+  --color-brand-bg: #0F172A;        /* Deep Slate */
+  --color-brand-surface: #1E293B;   /* Lighter Slate */
+  --color-brand-primary: #4F46E5;   /* Modern Indigo */
+  --color-brand-accent: #10B981;    /* Emerald Success */
+  --color-brand-border: #334155;    /* Border Slate */
+  --color-brand-text: #F8FAFC;
+  --color-brand-muted: #94A3B8;
+}
+
+:root {
+  background-color: var(--color-brand-bg);
+  color: var(--color-brand-text);
+}
+
+body {
+  margin: 0;
+  font-family: 'Inter', system-ui, -apple-system, sans-serif;
+}
