@@ -1,11 +1,11 @@
 // src/pages/Admin.tsx
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useMemo, useRef } from 'react';
 import type { FormEvent } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { auth, db } from '../services/firebase';
 import type { Question, ExamResult, Preset } from '../types/index';
 
-// ── Local Types ──────────────────────────────────────────────────────────────
+// ── Local Types ───────────────────────────────────────────────────────────────
 
 interface ExamResultDoc extends ExamResult {
   docId: string;
@@ -13,438 +13,120 @@ interface ExamResultDoc extends ExamResult {
 
 type ActiveTab = 'reports' | 'presets';
 
-const VALID_COUNTS = [25, 50, 75] as const;
+// ── Preset slot definitions (V1 parity — fixed slot IDs) ─────────────────────
+const PRESET_SLOTS = [
+  { id: 'preset_1', label: 'Slot A', targetCount: 25 },
+  { id: 'preset_2', label: 'Slot B', targetCount: 50 },
+  { id: 'preset_3', label: 'Slot C', targetCount: 75 },
+] as const;
 
-// ── Shared Sub-Components ────────────────────────────────────────────────────
+type SlotId = (typeof PRESET_SLOTS)[number]['id'];
 
-function DifficultyBadge({ level }: { level: string }) {
+const POOL_FILES = [
+  '/data/windchill_mock_test_1.json',
+  '/data/windchill_mock_test_2.json',
+  '/data/windchill_mock_test_3.json',
+  '/data/windchill_mock_test_4.json',
+  '/data/windchill_mock_test_5.json',
+];
+
+// ── Shared Sub-Components ─────────────────────────────────────────────────────
+
+function DiffBadge({ level }: { level: string }) {
   const map: Record<string, string> = {
-    easy:   'text-emerald-400 border-emerald-400/30 bg-emerald-400/10',
-    medium: 'text-yellow-400  border-yellow-400/30  bg-yellow-400/10',
-    hard:   'text-red-400     border-red-500/30     bg-red-500/10',
+    easy:   'bg-emerald-50 text-emerald-600 border-emerald-100',
+    medium: 'bg-amber-50  text-amber-600  border-amber-100',
+    hard:   'bg-red-50    text-red-600    border-red-100',
   };
-  const cls = map[level.toLowerCase()] ?? 'text-[#94A3B8] border-[#334155] bg-[#1E293B]';
+  const cls = map[level?.toLowerCase()] ?? 'bg-zinc-100 text-zinc-500 border-zinc-200';
   return (
-    <span className={`text-[9px] font-black uppercase tracking-widest px-2 py-0.5 rounded border ${cls}`}>
+    <span className={`text-[9px] font-semibold uppercase tracking-wider px-2 py-0.5 rounded-full border ${cls}`}>
       {level}
     </span>
   );
 }
 
-// Neomorphic checkbox — inset shadow creates the "pressed into surface" illusion
-function NeoCheckbox({ checked, onChange }: { checked: boolean; onChange: () => void }) {
+// Light-theme checkbox
+function LiteCheckbox({ checked, onChange }: { checked: boolean; onChange: () => void }) {
   return (
     <button
       type="button"
       onClick={(e) => { e.stopPropagation(); onChange(); }}
       aria-checked={checked}
-      className="w-5 h-5 rounded-md flex-shrink-0 flex items-center justify-center transition-all duration-150"
+      className="w-5 h-5 rounded-md flex-shrink-0 flex items-center justify-center transition-all duration-150 border-2"
       style={{
-        background:  checked ? '#4F46E5' : '#1E293B',
-        border:      checked ? '2px solid #4F46E5' : '2px solid transparent',
-        boxShadow:   checked
-          ? '0 0 0 2px rgba(79,70,229,0.25)'
-          : 'inset 3px 3px 6px #0a111e, inset -3px -3px 6px #2c3e54',
+        background:   checked ? '#4F46E5' : '#FFFFFF',
+        borderColor:  checked ? '#4F46E5' : '#D4D4D8',
+        boxShadow:    checked ? '0 0 0 3px rgba(79,70,229,0.15)' : 'none',
       }}
     >
       {checked && (
-        <svg width="10" height="8" viewBox="0 0 10 8" fill="none">
-          <path d="M1 4L3.5 6.5L9 1" stroke="white" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+        <svg className="w-3 h-3 text-white" viewBox="0 0 12 12" fill="none">
+          <path d="M2 6l3 3 5-5" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
         </svg>
       )}
     </button>
   );
 }
 
-// ── LOGIN SCREEN ─────────────────────────────────────────────────────────────
+// ── Reports Tab ───────────────────────────────────────────────────────────────
 
-function LoginScreen() {
-  const [email,    setEmail]    = useState('');
-  const [password, setPassword] = useState('');
-  const [error,    setError]    = useState('');
-  const [loading,  setLoading]  = useState(false);
+function ReportsTab() {
+  const [records,       setRecords]       = useState<ExamResultDoc[]>([]);
+  const [isLoading,     setIsLoading]     = useState(true);
+  const [filterName,    setFilterName]    = useState('');
+  const [filterFrom,    setFilterFrom]    = useState('');
+  const [filterTo,      setFilterTo]      = useState('');
+  const [filterScore,   setFilterScore]   = useState<'all' | 'pass' | 'fail'>('all');
+  const [selected,      setSelected]      = useState<Set<string>>(new Set());
+  const [isDeleting,    setIsDeleting]    = useState(false);
 
-  const handleSubmit = async (e: FormEvent<HTMLFormElement>) => {
-    e.preventDefault();
-    setError('');
-    setLoading(true);
-    try {
-      await auth.signInWithEmailAndPassword(email, password);
-      // onAuthStateChanged in parent handles transition — no explicit callback needed
-    } catch (err: unknown) {
-      setError((err as { message?: string }).message ?? 'Authentication failed. Check credentials and try again.');
-    } finally {
-      setLoading(false);
+  const fetchRecords = () => {
+    setIsLoading(true);
+    db.collection('exam_results')
+      .orderBy('examDate', 'desc')
+      .get()
+      .then(snap => {
+        const docs: ExamResultDoc[] = [];
+        snap.forEach(d => docs.push({ ...(d.data() as ExamResult), docId: d.id }));
+        setRecords(docs);
+      })
+      .catch(err => console.error('Fetch error:', err))
+      .finally(() => setIsLoading(false));
+  };
+
+  useEffect(() => { fetchRecords(); }, []);
+
+  const filtered = useMemo(() => {
+    return records.filter(r => {
+      const nameMatch  = !filterName || r.examineeName.toLowerCase().includes(filterName.toLowerCase());
+      const scoreMatch = filterScore === 'all' || (filterScore === 'pass' ? r.passed : !r.passed);
+      const date = r.examDate ? new Date(r.examDate) : null;
+      const fromMatch  = !filterFrom || (date && date >= new Date(filterFrom));
+      const toMatch    = !filterTo   || (date && date <= new Date(filterTo + 'T23:59:59'));
+      return nameMatch && scoreMatch && fromMatch && toMatch;
+    });
+  }, [records, filterName, filterScore, filterFrom, filterTo]);
+
+  const allSelected = filtered.length > 0 && filtered.every(r => selected.has(r.docId));
+
+  const toggleAll = () => {
+    if (allSelected) {
+      setSelected(prev => {
+        const next = new Set(prev);
+        filtered.forEach(r => next.delete(r.docId));
+        return next;
+      });
+    } else {
+      setSelected(prev => {
+        const next = new Set(prev);
+        filtered.forEach(r => next.add(r.docId));
+        return next;
+      });
     }
   };
 
-  return (
-    <motion.div
-      initial={{ opacity: 0, scale: 0.97, y: 16 }}
-      animate={{ opacity: 1, scale: 1,    y: 0  }}
-      transition={{ duration: 0.4, ease: 'easeOut' }}
-      className="max-w-md mx-auto mt-12"
-    >
-      <div className="bg-[#1E293B] border border-[#334155] rounded-[2rem] p-10 shadow-2xl">
-
-        {/* Identity Block */}
-        <div className="text-center mb-10">
-          <div className="inline-flex items-center justify-center w-16 h-16 rounded-2xl bg-[#4F46E5]/10 border border-[#4F46E5]/30 mb-5">
-            <span className="text-3xl select-none">🔐</span>
-          </div>
-          <h1 className="text-lg font-black text-[#F8FAFC] uppercase tracking-[0.2em]">
-            Admin Console
-          </h1>
-          <p className="text-[#94A3B8] text-[11px] font-semibold mt-1.5 tracking-wide">
-            Windchill Enterprise · Restricted Access
-          </p>
-        </div>
-
-        <form onSubmit={handleSubmit} className="space-y-5">
-          <div>
-            <label className="block text-[10px] font-black text-[#94A3B8] uppercase tracking-widest mb-2">
-              Email Address
-            </label>
-            <input
-              type="email"
-              value={email}
-              onChange={e => setEmail(e.target.value)}
-              placeholder="admin@example.com"
-              required
-              className="w-full bg-[#0F172A] border border-[#334155] p-4 rounded-xl text-white focus:border-[#4F46E5] outline-none transition-all font-semibold text-sm placeholder:text-[#475569]"
-            />
-          </div>
-
-          <div>
-            <label className="block text-[10px] font-black text-[#94A3B8] uppercase tracking-widest mb-2">
-              Password
-            </label>
-            <input
-              type="password"
-              value={password}
-              onChange={e => setPassword(e.target.value)}
-              placeholder="••••••••"
-              required
-              className="w-full bg-[#0F172A] border border-[#334155] p-4 rounded-xl text-white focus:border-[#4F46E5] outline-none transition-all font-semibold text-sm placeholder:text-[#475569]"
-            />
-          </div>
-
-          <AnimatePresence>
-            {error && (
-              <motion.div
-                key="err"
-                initial={{ opacity: 0, y: -4 }}
-                animate={{ opacity: 1, y: 0 }}
-                exit={{ opacity: 0 }}
-                className="bg-red-500/10 border border-red-500/30 rounded-xl p-3 text-red-400 text-xs font-bold"
-              >
-                ⚠&nbsp; {error}
-              </motion.div>
-            )}
-          </AnimatePresence>
-
-          <button
-            type="submit"
-            disabled={loading}
-            className={`w-full py-4 rounded-xl font-black text-[11px] uppercase tracking-[0.2em] transition-all mt-2 ${
-              loading
-                ? 'bg-[#334155] text-[#94A3B8] cursor-not-allowed'
-                : 'bg-[#4F46E5] text-white hover:bg-[#4338CA] shadow-lg shadow-[#4F46E5]/20 cursor-pointer'
-            }`}
-          >
-            {loading ? 'Authenticating…' : 'Access Console'}
-          </button>
-        </form>
-      </div>
-    </motion.div>
-  );
-}
-
-// ── TAB A: EXAM REPORTS ──────────────────────────────────────────────────────
-
-function ReportsTab() {
-  const [results,        setResults]        = useState<ExamResultDoc[]>([]);
-  const [loading,        setLoading]        = useState(true);
-  const [filterName,     setFilterName]     = useState('');
-  const [filterDate,     setFilterDate]     = useState('');
-  const [filterMinScore, setFilterMinScore] = useState('');
-  const [filterMaxScore, setFilterMaxScore] = useState('');
-
-  useEffect(() => {
-    const load = async () => {
-      try {
-        const snap = await db.collection('exam_results').orderBy('examDate', 'desc').get();
-        const docs: ExamResultDoc[] = [];
-        snap.forEach(doc => docs.push({ docId: doc.id, ...(doc.data() as ExamResult) }));
-        setResults(docs);
-      } catch (err) {
-        console.error('Failed to fetch exam_results:', err);
-      } finally {
-        setLoading(false);
-      }
-    };
-    load();
-  }, []);
-
-  const filtered = useMemo(() => {
-    return results.filter(r => {
-      const nameOk  = r.examineeName.toLowerCase().includes(filterName.toLowerCase());
-      const dateOk  = filterDate      ? r.examDate.includes(filterDate) : true;
-      const minOk   = filterMinScore  ? r.scorePercentage >= Number(filterMinScore) : true;
-      const maxOk   = filterMaxScore  ? r.scorePercentage <= Number(filterMaxScore) : true;
-      return nameOk && dateOk && minOk && maxOk;
-    });
-  }, [results, filterName, filterDate, filterMinScore, filterMaxScore]);
-
-  const exportCSV = () => {
-    const headers = [
-      'Name', 'Date', 'Mode', 'Score %', 'Correct', 'Total',
-      'Passed', 'Time (s)', 'Strongest Domain', 'Weakest Domain',
-    ];
-    const rows = filtered.map(r => [
-      `"${r.examineeName.replace(/"/g, '""')}"`,
-      `"${r.examDate}"`,
-      r.examMode,
-      r.scorePercentage,
-      r.questionsAnsweredCorrectly,
-      r.totalQuestions,
-      r.passed ? 'Yes' : 'No',
-      r.timeTakenSeconds,
-      `"${(r.strongestDomain ?? '').replace(/"/g, '""')}"`,
-      `"${(r.weakestDomain  ?? '').replace(/"/g, '""')}"`,
-    ]);
-    const csv  = [headers, ...rows].map(row => row.join(',')).join('\n');
-    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
-    const url  = URL.createObjectURL(blob);
-    const a    = document.createElement('a');
-    a.href     = url;
-    a.download = `exam_results_${new Date().toISOString().slice(0, 10)}.csv`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
-  };
-
-  if (loading) {
-    return (
-      <div className="flex items-center justify-center py-24 text-[#4F46E5] font-bold text-xs uppercase tracking-widest animate-pulse">
-        ⏳ &nbsp;Fetching Exam Records…
-      </div>
-    );
-  }
-
-  return (
-    <div className="space-y-5">
-
-      {/* ── Filter Bar ── */}
-      <div className="bg-[#1E293B] border border-[#334155] rounded-2xl p-5">
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-
-          <div>
-            <label className="block text-[10px] font-black text-[#94A3B8] uppercase tracking-widest mb-2">
-              Examinee Name
-            </label>
-            <input
-              type="text"
-              value={filterName}
-              onChange={e => setFilterName(e.target.value)}
-              placeholder="Search name…"
-              className="w-full bg-[#0F172A] border border-[#334155] p-3 rounded-xl text-white text-sm outline-none focus:border-[#4F46E5] transition-all placeholder:text-[#475569] font-semibold"
-            />
-          </div>
-
-          <div>
-            <label className="block text-[10px] font-black text-[#94A3B8] uppercase tracking-widest mb-2">
-              Date
-            </label>
-            <input
-              type="date"
-              value={filterDate}
-              onChange={e => setFilterDate(e.target.value)}
-              className="w-full bg-[#0F172A] border border-[#334155] p-3 rounded-xl text-white text-sm outline-none focus:border-[#4F46E5] transition-all font-semibold [color-scheme:dark]"
-            />
-          </div>
-
-          <div>
-            <label className="block text-[10px] font-black text-[#94A3B8] uppercase tracking-widest mb-2">
-              Min Score %
-            </label>
-            <input
-              type="number"
-              value={filterMinScore}
-              onChange={e => setFilterMinScore(e.target.value)}
-              placeholder="0"
-              min={0} max={100}
-              className="w-full bg-[#0F172A] border border-[#334155] p-3 rounded-xl text-white text-sm outline-none focus:border-[#4F46E5] transition-all placeholder:text-[#475569] font-semibold"
-            />
-          </div>
-
-          <div>
-            <label className="block text-[10px] font-black text-[#94A3B8] uppercase tracking-widest mb-2">
-              Max Score %
-            </label>
-            <input
-              type="number"
-              value={filterMaxScore}
-              onChange={e => setFilterMaxScore(e.target.value)}
-              placeholder="100"
-              min={0} max={100}
-              className="w-full bg-[#0F172A] border border-[#334155] p-3 rounded-xl text-white text-sm outline-none focus:border-[#4F46E5] transition-all placeholder:text-[#475569] font-semibold"
-            />
-          </div>
-        </div>
-      </div>
-
-      {/* ── Table Controls ── */}
-      <div className="flex items-center justify-between px-1">
-        <span className="text-[10px] font-black text-[#94A3B8] uppercase tracking-widest">
-          {filtered.length}&nbsp;/&nbsp;{results.length} Records
-        </span>
-        <button
-          onClick={exportCSV}
-          disabled={filtered.length === 0}
-          className="bg-[#4F46E5] hover:bg-[#4338CA] disabled:bg-[#334155] disabled:text-[#94A3B8] disabled:cursor-not-allowed text-white text-[10px] font-black uppercase tracking-widest px-5 py-2.5 rounded-xl transition-all shadow-lg shadow-[#4F46E5]/20 cursor-pointer"
-        >
-          ↓ Export CSV
-        </button>
-      </div>
-
-      {/* ── Glassmorphism Table ── */}
-      {filtered.length === 0 ? (
-        <div className="text-center py-16 text-[#94A3B8] text-sm font-semibold border border-[#334155] rounded-2xl bg-[#1E293B]/40">
-          No exam records match your current filters.
-        </div>
-      ) : (
-        <div
-          className="overflow-x-auto rounded-2xl border border-[#334155]"
-          style={{ background: 'rgba(30, 41, 59, 0.6)', backdropFilter: 'blur(16px)' }}
-        >
-          <table className="w-full text-sm">
-            <thead>
-              <tr className="border-b border-[#334155]" style={{ background: 'rgba(15,23,42,0.7)' }}>
-                {['Examinee', 'Date', 'Mode', 'Score', 'Correct / Total', 'Time', 'Status', 'Strongest Domain'].map(h => (
-                  <th
-                    key={h}
-                    className="text-left text-[10px] font-black text-[#94A3B8] uppercase tracking-widest px-5 py-4 whitespace-nowrap"
-                  >
-                    {h}
-                  </th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {filtered.map((r, idx) => (
-                <motion.tr
-                  key={r.docId}
-                  initial={{ opacity: 0, y: 4 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  transition={{ delay: Math.min(idx * 0.025, 0.5) }}
-                  className="border-b border-[#334155]/40 hover:bg-[#4F46E5]/5 transition-colors"
-                >
-                  <td className="px-5 py-4 font-bold text-white whitespace-nowrap">{r.examineeName}</td>
-
-                  <td className="px-5 py-4 text-[#94A3B8] whitespace-nowrap text-xs font-semibold">
-                    {r.examDate}
-                  </td>
-
-                  <td className="px-5 py-4">
-                    <span className="text-[9px] font-black uppercase px-2 py-1 rounded-lg bg-[#0F172A] border border-[#334155] text-[#94A3B8]">
-                      {r.examMode}
-                    </span>
-                  </td>
-
-                  <td className="px-5 py-4">
-                    <span className={`text-base font-black ${r.passed ? 'text-emerald-400' : 'text-red-400'}`}>
-                      {r.scorePercentage}%
-                    </span>
-                  </td>
-
-                  <td className="px-5 py-4 text-xs font-bold whitespace-nowrap">
-                    <span className="text-white">{r.questionsAnsweredCorrectly}</span>
-                    <span className="text-[#94A3B8]"> / {r.totalQuestions}</span>
-                  </td>
-
-                  <td className="px-5 py-4 text-[#94A3B8] text-xs font-bold whitespace-nowrap">
-                    {Math.floor(r.timeTakenSeconds / 60)}m {r.timeTakenSeconds % 60}s
-                  </td>
-
-                  <td className="px-5 py-4">
-                    <span className={`text-[9px] font-black uppercase px-2.5 py-1 rounded-lg border whitespace-nowrap ${
-                      r.passed
-                        ? 'text-emerald-400 bg-emerald-400/10 border-emerald-400/30'
-                        : 'text-red-400 bg-red-500/10 border-red-500/30'
-                    }`}>
-                      {r.passed ? '✓ Passed' : '✗ Failed'}
-                    </span>
-                  </td>
-
-                  <td className="px-5 py-4 text-[#94A3B8] text-[11px] font-semibold max-w-[160px] truncate">
-                    {r.strongestDomain ?? '—'}
-                  </td>
-                </motion.tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
-    </div>
-  );
-}
-
-// ── TAB B: PRESET MANAGER ────────────────────────────────────────────────────
-
-function PresetsTab() {
-  const [allQuestions,     setAllQuestions]     = useState<Question[]>([]);
-  const [loadingQ,         setLoadingQ]         = useState(true);
-  const [selected,         setSelected]         = useState<Set<number>>(new Set());
-  const [presetName,       setPresetName]       = useState('');
-  const [filterText,       setFilterText]       = useState('');
-  const [filterTopic,      setFilterTopic]      = useState('All');
-  const [filterDiff,       setFilterDiff]       = useState('All');
-  const [saving,           setSaving]           = useState(false);
-  const [saveStatus,       setSaveStatus]       = useState<'idle' | 'success' | 'error'>('idle');
-  const [existingPresets,  setExistingPresets]  = useState<Preset[]>([]);
-
-  // Load all question JSON files (gracefully skips missing files)
-  useEffect(() => {
-    const loadAll = async () => {
-      const acc: Question[] = [];
-      for (let i = 1; i <= 5; i++) {
-        try {
-          const res = await fetch(`/data/windchill_mock_test_${i}.json`);
-          if (res.ok) {
-            const data: Question[] = await res.json();
-            acc.push(...data);
-          }
-        } catch { /* file may not exist yet */ }
-      }
-      setAllQuestions(acc);
-      setLoadingQ(false);
-    };
-    loadAll();
-
-    db.collection('exam_presets').get().then(snap => {
-      const p: Preset[] = [];
-      snap.forEach(doc => p.push(doc.data() as Preset));
-      setExistingPresets(p);
-    }).catch(err => console.error('Failed to fetch presets:', err));
-  }, []);
-
-  const topics = useMemo(
-    () => ['All', ...Array.from(new Set(allQuestions.map(q => q.topic))).sort()],
-    [allQuestions],
-  );
-
-  const filtered = useMemo(() => {
-    return allQuestions.filter(q => {
-      const topicOk = filterTopic === 'All' || q.topic === filterTopic;
-      const diffOk  = filterDiff  === 'All' || q.difficulty === filterDiff;
-      const textOk  = filterText  === ''    || q.question.toLowerCase().includes(filterText.toLowerCase());
-      return topicOk && diffOk && textOk;
-    });
-  }, [allQuestions, filterTopic, filterDiff, filterText]);
-
-  const toggle = (id: number) => {
+  const toggleOne = (id: string) => {
     setSelected(prev => {
       const next = new Set(prev);
       next.has(id) ? next.delete(id) : next.add(id);
@@ -452,422 +134,719 @@ function PresetsTab() {
     });
   };
 
-  const selectVisible = () => setSelected(prev => new Set([...prev, ...filtered.map(q => q.id)]));
-  const clearAll      = () => setSelected(new Set());
-
-  const isValidCount = (VALID_COUNTS as readonly number[]).includes(selected.size);
-  const canSave      = isValidCount && presetName.trim().length > 0 && !saving;
-
-  const handleSave = async () => {
-    if (!canSave) return;
-    setSaving(true);
-    setSaveStatus('idle');
+  const handleBulkDelete = async () => {
+    if (selected.size === 0) return;
+    if (!confirm(`Permanently delete ${selected.size} record(s)? This cannot be undone.`)) return;
+    setIsDeleting(true);
     try {
-      const id: string = `preset_${Date.now()}`;
-      const preset: Preset = {
-        id,
-        name:        presetName.trim(),
-        targetCount: selected.size,
-        questions:   Array.from(selected),
-        updatedAt:   new Date().toISOString(),
-      };
-      await db.collection('exam_presets').doc(id).set(preset);
-      setExistingPresets(prev => [...prev, preset]);
-      setSaveStatus('success');
-      setPresetName('');
+      await Promise.all([...selected].map(id => db.collection('exam_results').doc(id).delete()));
       setSelected(new Set());
-      setTimeout(() => setSaveStatus('idle'), 3500);
+      fetchRecords();
     } catch (err) {
-      console.error('Preset save failed:', err);
-      setSaveStatus('error');
-      setTimeout(() => setSaveStatus('idle'), 4000);
+      console.error('Delete error:', err);
+      alert('Some records could not be deleted. Check console.');
     } finally {
-      setSaving(false);
+      setIsDeleting(false);
     }
   };
 
-  if (loadingQ) {
-    return (
-      <div className="flex items-center justify-center py-24 text-[#4F46E5] font-bold text-xs uppercase tracking-widest animate-pulse">
-        ⏳ &nbsp;Loading Question Bank…
-      </div>
-    );
-  }
+  const exportCSV = () => {
+    const rows = [
+      ['Name', 'Mode', 'Score %', 'Correct', 'Total', 'Passed', 'Strongest Domain', 'Weakest Domain', 'Time (s)', 'Date'],
+      ...filtered.map(r => [
+        r.examineeName, r.examMode, r.scorePercentage, r.questionsAnsweredCorrectly,
+        r.totalQuestions, r.passed ? 'Yes' : 'No',
+        r.strongestDomain ?? '', r.weakestDomain ?? '',
+        r.timeTakenSeconds, r.examDate,
+      ]),
+    ];
+    const csv  = rows.map(r => r.map(c => `"${c}"`).join(',')).join('\n');
+    const blob = new Blob([csv], { type: 'text/csv' });
+    const url  = URL.createObjectURL(blob);
+    const a    = document.createElement('a');
+    a.href = url; a.download = `exam_results_${Date.now()}.csv`; a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const fmtDate = (iso?: string) => {
+    if (!iso) return '—';
+    return new Date(iso).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' });
+  };
+
+  const fmtTime = (sec?: number) => {
+    if (!sec) return '—';
+    const m = Math.floor(sec / 60);
+    const s = sec % 60;
+    return `${m}m ${s}s`;
+  };
 
   return (
     <div className="space-y-5">
-
-      {/* ── Save / Counter Panel ── */}
-      <div className="bg-[#1E293B] border border-[#334155] rounded-2xl p-6">
-        <div className="flex flex-col sm:flex-row gap-4 items-start sm:items-end">
-
-          {/* Preset name input */}
-          <div className="flex-grow">
-            <label className="block text-[10px] font-black text-[#94A3B8] uppercase tracking-widest mb-2">
-              Preset Name
-            </label>
+      {/* Filters */}
+      <div className="bg-white border border-zinc-100 rounded-2xl p-5 shadow-sm">
+        <p className="text-[10px] font-semibold text-zinc-400 uppercase tracking-wider mb-3">Filter Records</p>
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+          <input
+            type="text"
+            placeholder="Search by name…"
+            value={filterName}
+            onChange={e => setFilterName(e.target.value)}
+            className="bg-zinc-50 border border-zinc-200 rounded-xl px-3 py-2.5 text-sm text-zinc-800 font-medium outline-none focus:border-indigo-400 focus:ring-2 focus:ring-indigo-100 transition-all placeholder:text-zinc-300"
+          />
+          <select
+            value={filterScore}
+            onChange={e => setFilterScore(e.target.value as 'all' | 'pass' | 'fail')}
+            className="bg-zinc-50 border border-zinc-200 rounded-xl px-3 py-2.5 text-sm text-zinc-800 font-medium outline-none focus:border-indigo-400 transition-all"
+          >
+            <option value="all">All Results</option>
+            <option value="pass">Passed Only</option>
+            <option value="fail">Failed Only</option>
+          </select>
+          <div className="relative">
+            <label className="absolute -top-2 left-3 text-[9px] font-semibold text-zinc-400 uppercase tracking-wider bg-white px-1">From</label>
             <input
-              type="text"
-              value={presetName}
-              onChange={e => setPresetName(e.target.value)}
-              placeholder="e.g. Mock Exam — Set A"
-              className="w-full bg-[#0F172A] border border-[#334155] p-3 rounded-xl text-white text-sm outline-none focus:border-[#4F46E5] transition-all placeholder:text-[#475569] font-semibold"
+              type="date"
+              value={filterFrom}
+              onChange={e => setFilterFrom(e.target.value)}
+              className="w-full bg-zinc-50 border border-zinc-200 rounded-xl px-3 py-2.5 text-sm text-zinc-800 font-medium outline-none focus:border-indigo-400 transition-all"
             />
           </div>
-
-          {/* Live counters */}
-          <div className="flex items-center gap-3">
-            <div className="text-center bg-[#0F172A] border border-[#334155] px-5 py-3 rounded-xl min-w-[72px]">
-              <div className={`text-xl font-black transition-colors ${
-                isValidCount    ? 'text-emerald-400' :
-                selected.size > 0 ? 'text-yellow-400'  : 'text-[#94A3B8]'
-              }`}>
-                {selected.size}
-              </div>
-              <div className="text-[9px] font-black text-[#94A3B8] uppercase tracking-widest mt-0.5">Selected</div>
-            </div>
-            <div className="text-center bg-[#0F172A] border border-[#334155] px-5 py-3 rounded-xl min-w-[72px]">
-              <div className="text-xl font-black text-[#94A3B8]">{allQuestions.length}</div>
-              <div className="text-[9px] font-black text-[#94A3B8] uppercase tracking-widest mt-0.5">Total Q's</div>
-            </div>
+          <div className="relative">
+            <label className="absolute -top-2 left-3 text-[9px] font-semibold text-zinc-400 uppercase tracking-wider bg-white px-1">To</label>
+            <input
+              type="date"
+              value={filterTo}
+              onChange={e => setFilterTo(e.target.value)}
+              className="w-full bg-zinc-50 border border-zinc-200 rounded-xl px-3 py-2.5 text-sm text-zinc-800 font-medium outline-none focus:border-indigo-400 transition-all"
+            />
           </div>
-
-          {/* Save button */}
-          <button
-            onClick={handleSave}
-            disabled={!canSave}
-            className={`px-7 py-3.5 rounded-xl font-black text-[11px] uppercase tracking-widest transition-all whitespace-nowrap ${
-              canSave
-                ? 'bg-[#4F46E5] text-white hover:bg-[#4338CA] shadow-lg shadow-[#4F46E5]/20 cursor-pointer'
-                : 'bg-[#334155] text-[#94A3B8] cursor-not-allowed opacity-60'
-            }`}
-          >
-            {saving ? 'Pushing…' : '↑ Push Preset'}
-          </button>
         </div>
-
-        {/* Count validation pills */}
-        <div className="flex flex-wrap gap-2 mt-4">
-          {VALID_COUNTS.map(n => (
-            <span
-              key={n}
-              className={`text-[10px] font-black px-3 py-1 rounded-lg border uppercase tracking-wider transition-all ${
-                selected.size === n
-                  ? 'text-emerald-400 bg-emerald-400/10 border-emerald-400/40'
-                  : 'text-[#94A3B8] border-[#334155] bg-[#0F172A]'
-              }`}
-            >
-              {n} Questions {selected.size === n ? '✓' : ''}
-            </span>
-          ))}
-          {!isValidCount && selected.size > 0 && (
-            <span className="text-[10px] font-bold text-yellow-400 border border-yellow-400/30 bg-yellow-400/5 px-3 py-1 rounded-lg">
-              ⚠ Must select exactly 25, 50, or 75
-            </span>
-          )}
-        </div>
-
-        {/* Save feedback */}
-        <AnimatePresence>
-          {saveStatus === 'success' && (
-            <motion.div
-              key="ok"
-              initial={{ opacity: 0, y: -4 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }}
-              className="mt-4 text-emerald-400 text-xs font-bold bg-emerald-400/10 border border-emerald-400/30 rounded-xl p-3"
-            >
-              ✓ Preset pushed to Firestore successfully.
-            </motion.div>
-          )}
-          {saveStatus === 'error' && (
-            <motion.div
-              key="fail"
-              initial={{ opacity: 0, y: -4 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }}
-              className="mt-4 text-red-400 text-xs font-bold bg-red-500/10 border border-red-500/30 rounded-xl p-3"
-            >
-              ✗ Failed to save preset. Check the browser console for details.
-            </motion.div>
-          )}
-        </AnimatePresence>
       </div>
 
-      {/* ── Active Presets in Firestore ── */}
-      {existingPresets.length > 0 && (
-        <div className="bg-[#0F172A]/50 border border-[#334155] rounded-2xl p-5">
-          <h4 className="text-[10px] font-black text-[#94A3B8] uppercase tracking-widest mb-3">
-            Active Presets in Firestore ({existingPresets.length})
-          </h4>
-          <div className="flex flex-wrap gap-2">
-            {existingPresets.map(p => (
-              <div
-                key={p.id}
-                className="flex items-center gap-2 bg-[#1E293B] border border-[#334155] px-3 py-2 rounded-xl"
-              >
-                <span className="text-white text-xs font-bold">{p.name}</span>
-                <span className="text-[9px] font-black text-[#4F46E5] bg-[#4F46E5]/10 border border-[#4F46E5]/30 px-1.5 py-0.5 rounded">
-                  {p.targetCount}Q
-                </span>
-                <span className="text-[9px] font-semibold text-[#94A3B8]">
-                  {new Date(p.updatedAt).toLocaleDateString()}
-                </span>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-
-      {/* ── Filters ── */}
-      <div className="bg-[#0F172A]/40 border border-[#334155] rounded-2xl p-5">
-        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-          <div>
-            <label className="block text-[10px] font-black text-[#94A3B8] uppercase tracking-widest mb-2">
-              Search Text
-            </label>
-            <input
-              type="text"
-              value={filterText}
-              onChange={e => setFilterText(e.target.value)}
-              placeholder="Filter question text…"
-              className="w-full bg-[#1E293B] border border-[#334155] p-3 rounded-xl text-white text-sm outline-none focus:border-[#4F46E5] transition-all placeholder:text-[#475569] font-semibold"
-            />
-          </div>
-          <div>
-            <label className="block text-[10px] font-black text-[#94A3B8] uppercase tracking-widest mb-2">
-              Topic
-            </label>
-            <select
-              value={filterTopic}
-              onChange={e => setFilterTopic(e.target.value)}
-              className="w-full bg-[#1E293B] border border-[#334155] p-3 rounded-xl text-white text-sm outline-none font-semibold"
-            >
-              {topics.map(t => <option key={t} value={t}>{t}</option>)}
-            </select>
-          </div>
-          <div>
-            <label className="block text-[10px] font-black text-[#94A3B8] uppercase tracking-widest mb-2">
-              Difficulty
-            </label>
-            <select
-              value={filterDiff}
-              onChange={e => setFilterDiff(e.target.value)}
-              className="w-full bg-[#1E293B] border border-[#334155] p-3 rounded-xl text-white text-sm outline-none font-semibold"
-            >
-              {['All', 'easy', 'medium', 'hard'].map(d => (
-                <option key={d} value={d}>
-                  {d === 'All' ? 'All Difficulties' : d.charAt(0).toUpperCase() + d.slice(1)}
-                </option>
-              ))}
-            </select>
-          </div>
-        </div>
-
-        {/* Quick-select actions */}
-        <div className="flex items-center gap-3 mt-4 flex-wrap">
-          <button
-            onClick={selectVisible}
-            className="text-[10px] font-black uppercase tracking-widest text-[#4F46E5] border border-[#4F46E5]/30 bg-[#4F46E5]/5 hover:bg-[#4F46E5]/10 px-4 py-2 rounded-lg transition-all cursor-pointer"
-          >
-            + Select Visible ({filtered.length})
-          </button>
-          <button
-            onClick={clearAll}
-            className="text-[10px] font-black uppercase tracking-widest text-[#94A3B8] border border-[#334155] hover:bg-white/5 px-4 py-2 rounded-lg transition-all cursor-pointer"
-          >
-            Clear All
-          </button>
-          <span className="ml-auto text-[10px] font-bold text-[#94A3B8]">
-            {filtered.length} / {allQuestions.length} questions visible
+      {/* Action bar */}
+      <div className="flex items-center justify-between flex-wrap gap-3">
+        <div className="flex items-center gap-3">
+          <span className="text-sm font-semibold text-zinc-600">
+            {filtered.length} record{filtered.length !== 1 ? 's' : ''}
           </span>
+          {selected.size > 0 && (
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95 }}
+              animate={{ opacity: 1, scale: 1 }}
+              className="flex items-center gap-2"
+            >
+              <span className="text-xs font-semibold text-indigo-600 bg-indigo-50 border border-indigo-100 px-3 py-1 rounded-full">
+                {selected.size} selected
+              </span>
+              <button
+                onClick={handleBulkDelete}
+                disabled={isDeleting}
+                className="text-xs font-semibold text-red-500 bg-red-50 border border-red-100 hover:bg-red-100 px-3 py-1 rounded-full transition-colors disabled:opacity-50"
+              >
+                {isDeleting ? 'Deleting…' : 'Delete Selected'}
+              </button>
+            </motion.div>
+          )}
         </div>
+        <button
+          onClick={exportCSV}
+          disabled={filtered.length === 0}
+          className="text-xs font-semibold text-indigo-600 bg-indigo-50 border border-indigo-100 hover:bg-indigo-100 px-4 py-2 rounded-xl transition-colors disabled:opacity-40"
+        >
+          Export CSV
+        </button>
       </div>
 
-      {/* ── Question List ── */}
-      <div className="space-y-2">
-        {filtered.length === 0 && (
-          <div className="text-center py-12 text-[#94A3B8] text-sm font-semibold border border-[#334155] rounded-2xl bg-[#1E293B]/30">
-            No questions match the current filters.
+      {/* Table */}
+      <div className="bg-white border border-zinc-100 rounded-2xl shadow-sm overflow-hidden">
+        {isLoading ? (
+          <div className="flex items-center justify-center h-40">
+            <div className="w-6 h-6 border-2 border-indigo-400 border-t-transparent rounded-full animate-spin" />
+          </div>
+        ) : filtered.length === 0 ? (
+          <div className="text-center py-16 text-zinc-400 text-sm font-medium">
+            No records match your filters.
+          </div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="bg-zinc-50 border-b border-zinc-100">
+                  <th className="px-4 py-3 text-left">
+                    <LiteCheckbox checked={allSelected} onChange={toggleAll} />
+                  </th>
+                  {['Examinee', 'Mode', 'Score', 'Result', 'Time', 'Strongest Domain', 'Date'].map(h => (
+                    <th key={h} className="px-4 py-3 text-left text-[10px] font-semibold text-zinc-400 uppercase tracking-wider whitespace-nowrap">
+                      {h}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {filtered.map((r, i) => (
+                  <tr
+                    key={r.docId}
+                    className={`border-b border-zinc-50 hover:bg-zinc-50/60 transition-colors ${
+                      selected.has(r.docId) ? 'bg-indigo-50/40' : i % 2 === 0 ? 'bg-white' : 'bg-zinc-50/30'
+                    }`}
+                  >
+                    <td className="px-4 py-3">
+                      <LiteCheckbox checked={selected.has(r.docId)} onChange={() => toggleOne(r.docId)} />
+                    </td>
+                    <td className="px-4 py-3 font-semibold text-zinc-800 whitespace-nowrap">{r.examineeName}</td>
+                    <td className="px-4 py-3">
+                      <span className="text-[11px] font-medium text-zinc-500 capitalize bg-zinc-100 px-2.5 py-1 rounded-full">
+                        {r.examMode}
+                      </span>
+                    </td>
+                    <td className="px-4 py-3">
+                      <span className={`text-sm font-bold ${r.scorePercentage >= 80 ? 'text-emerald-600' : 'text-red-500'}`}>
+                        {r.scorePercentage}%
+                      </span>
+                      <span className="text-[11px] text-zinc-400 ml-1">
+                        ({r.questionsAnsweredCorrectly}/{r.totalQuestions})
+                      </span>
+                    </td>
+                    <td className="px-4 py-3">
+                      <span className={`text-[11px] font-semibold px-2.5 py-1 rounded-full border ${
+                        r.passed
+                          ? 'bg-emerald-50 text-emerald-600 border-emerald-100'
+                          : 'bg-red-50 text-red-500 border-red-100'
+                      }`}>
+                        {r.passed ? 'PASS' : 'FAIL'}
+                      </span>
+                    </td>
+                    <td className="px-4 py-3 text-zinc-500 font-medium whitespace-nowrap">{fmtTime(r.timeTakenSeconds)}</td>
+                    <td className="px-4 py-3 text-zinc-500 font-medium text-[12px] max-w-[140px] truncate">
+                      {r.strongestDomain ?? '—'}
+                    </td>
+                    <td className="px-4 py-3 text-zinc-400 text-[12px] whitespace-nowrap">{fmtDate(r.examDate)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           </div>
         )}
-        {filtered.map(q => {
-          const isChecked = selected.has(q.id);
-          const isMulti   = Array.isArray(q.correctAnswer);
-
-          return (
-            <motion.div
-              key={q.id}
-              layout
-              onClick={() => toggle(q.id)}
-              className={`flex items-start gap-4 p-4 rounded-xl border cursor-pointer select-none transition-all duration-150 ${
-                isChecked
-                  ? 'border-[#4F46E5]/50 bg-[#4F46E5]/5'
-                  : 'border-[#334155] bg-[#1E293B]/50 hover:border-[#4F46E5]/30 hover:bg-[#4F46E5]/5'
-              }`}
-            >
-              {/* Neomorphic checkbox */}
-              <div className="pt-0.5 flex-shrink-0">
-                <NeoCheckbox
-                  checked={isChecked}
-                  onChange={() => toggle(q.id)}
-                />
-              </div>
-
-              {/* Question meta + text */}
-              <div className="flex-grow min-w-0">
-                <div className="flex flex-wrap items-center gap-2 mb-1.5">
-                  <span className="text-[9px] font-black text-[#475569] uppercase tracking-widest">
-                    #{q.id}
-                  </span>
-                  <span className="text-[9px] font-black uppercase tracking-widest px-2 py-0.5 rounded bg-[#0F172A] border border-[#334155] text-[#94A3B8]">
-                    {q.topic}
-                  </span>
-                  <DifficultyBadge level={q.difficulty ?? 'unrated'} />
-                  {isMulti && (
-                    <span className="text-[9px] font-black uppercase tracking-widest px-2 py-0.5 rounded border text-[#4F46E5] bg-[#4F46E5]/10 border-[#4F46E5]/30">
-                      Multi
-                    </span>
-                  )}
-                </div>
-                <p className="text-sm text-[#F8FAFC] font-semibold leading-snug line-clamp-2">
-                  {q.question}
-                </p>
-              </div>
-            </motion.div>
-          );
-        })}
       </div>
     </div>
   );
 }
 
-// ── MAIN ADMIN COMPONENT ─────────────────────────────────────────────────────
+// ── Presets Tab ───────────────────────────────────────────────────────────────
+
+function PresetsTab() {
+  const [allQuestions,   setAllQuestions]   = useState<Question[]>([]);
+  const [isPoolLoading,  setIsPoolLoading]  = useState(true);
+  const [activeSlot,     setActiveSlot]     = useState<SlotId>('preset_1');
+  const [slotPresets,    setSlotPresets]    = useState<Partial<Record<SlotId, Preset>>>({});
+  const [search,         setSearch]         = useState('');
+  const [filterTopic,    setFilterTopic]    = useState('');
+  const [filterDiff,     setFilterDiff]     = useState('');
+  const [selected,       setSelected]       = useState<Set<number>>(new Set());
+  const [presetName,     setPresetName]     = useState('');
+  const [isSaving,       setIsSaving]       = useState(false);
+  const [isDeleting,     setIsDeleting]     = useState(false);
+  const [saveMsg,        setSaveMsg]        = useState('');
+
+  const slot = PRESET_SLOTS.find(s => s.id === activeSlot)!;
+
+  // Load question pool
+  useEffect(() => {
+    const init = async () => {
+      const reqs = POOL_FILES.map(f => fetch(f).then(r => r.ok ? r.json() : []).catch(() => []));
+      const flat: Question[] = (await Promise.all(reqs)).flat();
+      setAllQuestions(flat);
+      setIsPoolLoading(false);
+    };
+    init();
+  }, []);
+
+  // Load existing preset for each slot
+  useEffect(() => {
+    PRESET_SLOTS.forEach(s => {
+      db.collection('exam_presets').doc(s.id).get()
+        .then(doc => {
+          if (doc.exists) {
+            setSlotPresets(prev => ({ ...prev, [s.id]: doc.data() as Preset }));
+          }
+        })
+        .catch(err => console.error(`Preset load error for ${s.id}:`, err));
+    });
+  }, []);
+
+  // When slot changes, populate name from existing preset
+  useEffect(() => {
+    const existing = slotPresets[activeSlot];
+    setPresetName(existing?.name ?? '');
+    setSelected(new Set(existing?.questions ?? []));
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeSlot, slotPresets]);
+
+  const topics = useMemo(() => [...new Set(allQuestions.map(q => q.topic))].sort(), [allQuestions]);
+
+  const filtered = useMemo(() => {
+    return allQuestions.filter(q => {
+      const textMatch  = !search || q.question.toLowerCase().includes(search.toLowerCase());
+      const topicMatch = !filterTopic || q.topic === filterTopic;
+      const diffMatch  = !filterDiff  || q.difficulty?.toLowerCase() === filterDiff;
+      return textMatch && topicMatch && diffMatch;
+    });
+  }, [allQuestions, search, filterTopic, filterDiff]);
+
+  const allFiltered = filtered.length > 0 && filtered.every(q => selected.has(q.id));
+
+  const toggleAll = () => {
+    if (allFiltered) {
+      setSelected(prev => {
+        const next = new Set(prev);
+        filtered.forEach(q => next.delete(q.id));
+        return next;
+      });
+    } else {
+      setSelected(prev => {
+        const next = new Set(prev);
+        filtered.forEach(q => next.add(q.id));
+        return next;
+      });
+    }
+  };
+
+  const toggleQ = (id: number) => {
+    setSelected(prev => {
+      const next = new Set(prev);
+      next.has(id) ? next.delete(id) : next.add(id);
+      return next;
+    });
+  };
+
+  const handleSave = async (e: FormEvent) => {
+    e.preventDefault();
+    if (selected.size !== slot.targetCount) return;
+    if (!presetName.trim()) return;
+    setIsSaving(true);
+    setSaveMsg('');
+    try {
+      const payload: Preset = {
+        id:          activeSlot,
+        name:        presetName.trim(),
+        questions:   [...selected],
+        targetCount: slot.targetCount,
+        updatedAt:   new Date().toISOString(),
+      };
+      await db.collection('exam_presets').doc(activeSlot).set(payload);
+      setSlotPresets(prev => ({ ...prev, [activeSlot]: payload }));
+      setSaveMsg('Preset saved successfully.');
+    } catch (err) {
+      console.error('Save error:', err);
+      setSaveMsg('Error saving preset.');
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  const handleDelete = async () => {
+    if (!confirm(`Delete the preset in ${slot.label}? This cannot be undone.`)) return;
+    setIsDeleting(true);
+    try {
+      await db.collection('exam_presets').doc(activeSlot).delete();
+      setSlotPresets(prev => { const next = { ...prev }; delete next[activeSlot]; return next; });
+      setPresetName('');
+      setSelected(new Set());
+      setSaveMsg('Preset deleted.');
+    } catch (err) {
+      console.error('Delete error:', err);
+      setSaveMsg('Error deleting preset.');
+    } finally {
+      setIsDeleting(false);
+    }
+  };
+
+  const existingPreset = slotPresets[activeSlot];
+
+  return (
+    <div className="grid grid-cols-1 xl:grid-cols-3 gap-5">
+
+      {/* Left — Slot selector + form */}
+      <div className="xl:col-span-1 space-y-4">
+
+        {/* Slot tabs */}
+        <div className="bg-white border border-zinc-100 rounded-2xl p-5 shadow-sm">
+          <p className="text-[10px] font-semibold text-zinc-400 uppercase tracking-wider mb-3">Preset Slots</p>
+          <div className="space-y-2">
+            {PRESET_SLOTS.map(s => (
+              <button
+                key={s.id}
+                onClick={() => setActiveSlot(s.id)}
+                className={`w-full flex items-center justify-between px-4 py-3 rounded-xl border-2 transition-all text-left ${
+                  activeSlot === s.id
+                    ? 'border-indigo-400 bg-indigo-50'
+                    : 'border-zinc-100 bg-zinc-50 hover:border-indigo-200'
+                }`}
+              >
+                <div>
+                  <span className={`text-sm font-semibold ${activeSlot === s.id ? 'text-indigo-700' : 'text-zinc-700'}`}>
+                    {s.label}
+                  </span>
+                  <span className="text-[11px] text-zinc-400 ml-2">{s.targetCount}Q</span>
+                </div>
+                {slotPresets[s.id] ? (
+                  <span className="text-[10px] font-semibold text-emerald-600 bg-emerald-50 border border-emerald-100 px-2 py-0.5 rounded-full">
+                    Active
+                  </span>
+                ) : (
+                  <span className="text-[10px] font-medium text-zinc-400">Empty</span>
+                )}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {/* Preset form */}
+        <div className="bg-white border border-zinc-100 rounded-2xl p-5 shadow-sm">
+          <div className="flex items-center justify-between mb-4">
+            <p className="text-[10px] font-semibold text-zinc-400 uppercase tracking-wider">
+              {slot.label} — {slot.targetCount} Questions
+            </p>
+            {existingPreset && (
+              <button
+                onClick={handleDelete}
+                disabled={isDeleting}
+                className="text-[11px] font-semibold text-red-500 hover:text-red-600 transition-colors disabled:opacity-50"
+              >
+                {isDeleting ? 'Deleting…' : 'Delete Preset'}
+              </button>
+            )}
+          </div>
+
+          <form onSubmit={handleSave} className="space-y-4">
+            <div>
+              <label className="block text-[10px] font-semibold text-zinc-400 uppercase tracking-wider mb-1.5">
+                Preset Name
+              </label>
+              <input
+                type="text"
+                placeholder="e.g. Week 3 Mock Exam"
+                value={presetName}
+                onChange={e => setPresetName(e.target.value)}
+                className="w-full bg-zinc-50 border border-zinc-200 rounded-xl px-3 py-2.5 text-sm text-zinc-800 font-medium outline-none focus:border-indigo-400 focus:ring-2 focus:ring-indigo-100 transition-all placeholder:text-zinc-300"
+              />
+            </div>
+
+            {/* Selection count indicator */}
+            <div className={`rounded-xl px-4 py-3 border text-center ${
+              selected.size === slot.targetCount
+                ? 'bg-emerald-50 border-emerald-100'
+                : 'bg-zinc-50 border-zinc-100'
+            }`}>
+              <span className={`text-sm font-bold ${
+                selected.size === slot.targetCount ? 'text-emerald-600' : 'text-zinc-500'
+              }`}>
+                {selected.size} / {slot.targetCount} selected
+              </span>
+              {selected.size !== slot.targetCount && (
+                <p className="text-[11px] text-zinc-400 mt-0.5">
+                  Select exactly {slot.targetCount} questions to save
+                </p>
+              )}
+            </div>
+
+            <button
+              type="submit"
+              disabled={selected.size !== slot.targetCount || !presetName.trim() || isSaving}
+              className="w-full py-3 rounded-xl font-semibold text-sm transition-all disabled:opacity-40 disabled:cursor-not-allowed bg-indigo-600 hover:bg-indigo-700 text-white shadow-sm shadow-indigo-100"
+            >
+              {isSaving ? 'Saving…' : `Save ${slot.label} Preset`}
+            </button>
+
+            {saveMsg && (
+              <motion.p
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                className={`text-[12px] font-medium text-center ${
+                  saveMsg.includes('Error') ? 'text-red-500' : 'text-emerald-600'
+                }`}
+              >
+                {saveMsg}
+              </motion.p>
+            )}
+          </form>
+        </div>
+      </div>
+
+      {/* Right — Question picker */}
+      <div className="xl:col-span-2 space-y-4">
+        {/* Filters */}
+        <div className="bg-white border border-zinc-100 rounded-2xl p-5 shadow-sm">
+          <p className="text-[10px] font-semibold text-zinc-400 uppercase tracking-wider mb-3">Filter Question Pool</p>
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+            <input
+              type="text"
+              placeholder="Search questions…"
+              value={search}
+              onChange={e => setSearch(e.target.value)}
+              className="bg-zinc-50 border border-zinc-200 rounded-xl px-3 py-2.5 text-sm text-zinc-800 font-medium outline-none focus:border-indigo-400 focus:ring-2 focus:ring-indigo-100 transition-all placeholder:text-zinc-300"
+            />
+            <select
+              value={filterTopic}
+              onChange={e => setFilterTopic(e.target.value)}
+              className="bg-zinc-50 border border-zinc-200 rounded-xl px-3 py-2.5 text-sm text-zinc-800 font-medium outline-none focus:border-indigo-400 transition-all"
+            >
+              <option value="">All Topics</option>
+              {topics.map(t => <option key={t} value={t}>{t}</option>)}
+            </select>
+            <select
+              value={filterDiff}
+              onChange={e => setFilterDiff(e.target.value)}
+              className="bg-zinc-50 border border-zinc-200 rounded-xl px-3 py-2.5 text-sm text-zinc-800 font-medium outline-none focus:border-indigo-400 transition-all"
+            >
+              <option value="">All Difficulties</option>
+              <option value="easy">Easy</option>
+              <option value="medium">Medium</option>
+              <option value="hard">Hard</option>
+            </select>
+          </div>
+        </div>
+
+        {/* Question list */}
+        <div className="bg-white border border-zinc-100 rounded-2xl shadow-sm overflow-hidden">
+          {isPoolLoading ? (
+            <div className="flex items-center justify-center h-40">
+              <div className="w-6 h-6 border-2 border-indigo-400 border-t-transparent rounded-full animate-spin" />
+            </div>
+          ) : (
+            <>
+              {/* Header row */}
+              <div className="flex items-center gap-3 px-4 py-3 bg-zinc-50 border-b border-zinc-100">
+                <LiteCheckbox checked={allFiltered} onChange={toggleAll} />
+                <span className="text-[10px] font-semibold text-zinc-400 uppercase tracking-wider">
+                  {filtered.length} question{filtered.length !== 1 ? 's' : ''} shown
+                </span>
+              </div>
+
+              <div className="max-h-[520px] overflow-y-auto divide-y divide-zinc-50">
+                {filtered.map(q => (
+                  <div
+                    key={q.id}
+                    onClick={() => toggleQ(q.id)}
+                    className={`flex items-start gap-3 px-4 py-3.5 cursor-pointer transition-colors ${
+                      selected.has(q.id) ? 'bg-indigo-50/50' : 'hover:bg-zinc-50'
+                    }`}
+                  >
+                    <LiteCheckbox checked={selected.has(q.id)} onChange={() => toggleQ(q.id)} />
+                    <div className="flex-grow min-w-0">
+                      <p className="text-[13px] font-medium text-zinc-700 leading-snug line-clamp-2">{q.question}</p>
+                      <div className="flex items-center gap-2 mt-1.5 flex-wrap">
+                        <span className="text-[10px] font-medium bg-zinc-100 text-zinc-500 px-2 py-0.5 rounded-full">
+                          {q.topic}
+                        </span>
+                        <DiffBadge level={q.difficulty} />
+                        {Array.isArray(q.correctAnswer) && (
+                          <span className="text-[10px] font-medium bg-indigo-50 text-indigo-500 border border-indigo-100 px-2 py-0.5 rounded-full">
+                            Multi
+                          </span>
+                        )}
+                        <span className="text-[10px] text-zinc-300 font-medium ml-auto">#{q.id}</span>
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── Main Admin Component ──────────────────────────────────────────────────────
 
 export default function Admin() {
   const [isAuthenticated, setIsAuthenticated] = useState(false);
-  const [authChecked,     setAuthChecked]     = useState(false);
-  const [userEmail,       setUserEmail]       = useState<string | null>(null);
+  const [isAuthLoading,   setIsAuthLoading]   = useState(true);
   const [activeTab,       setActiveTab]       = useState<ActiveTab>('reports');
+  const [email,           setEmail]           = useState('');
+  const [password,        setPassword]        = useState('');
+  const [loginError,      setLoginError]      = useState('');
+  const [isLoggingIn,     setIsLoggingIn]     = useState(false);
 
-  // Single source of truth: Firebase auth state observer
+  // Auth state observer
   useEffect(() => {
-    const unsubscribe = auth.onAuthStateChanged(user => {
+    const unsub = auth.onAuthStateChanged(user => {
       setIsAuthenticated(!!user);
-      setUserEmail(user?.email ?? null);
-      setAuthChecked(true);
+      setIsAuthLoading(false);
     });
-    return () => unsubscribe();
+    return unsub;
   }, []);
 
-  // Auto-logout after 2 minutes of inactivity
+  // Inactivity auto-logout (2 minutes)
+  const inactivityTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => {
     if (!isAuthenticated) return;
-
-    let timer: ReturnType<typeof setTimeout>;
-
+    const TIMEOUT = 120_000;
     const resetTimer = () => {
-      clearTimeout(timer);
-      timer = setTimeout(() => auth.signOut(), 120_000);
+      if (inactivityTimer.current) clearTimeout(inactivityTimer.current);
+      inactivityTimer.current = setTimeout(() => auth.signOut(), TIMEOUT);
     };
-
     const events = ['mousemove', 'mousedown', 'keydown', 'touchstart', 'scroll', 'click'] as const;
     events.forEach(evt => window.addEventListener(evt, resetTimer, { passive: true }));
-    resetTimer(); // arm immediately on login
-
+    resetTimer();
     return () => {
-      clearTimeout(timer);
+      if (inactivityTimer.current) clearTimeout(inactivityTimer.current);
       events.forEach(evt => window.removeEventListener(evt, resetTimer));
     };
   }, [isAuthenticated]);
 
-  const handleLogout = async () => {
-    await auth.signOut();
+  const handleLogin = async (e: FormEvent) => {
+    e.preventDefault();
+    setLoginError('');
+    setIsLoggingIn(true);
+    try {
+      await auth.signInWithEmailAndPassword(email, password);
+    } catch {
+      setLoginError('Invalid credentials. Please try again.');
+    } finally {
+      setIsLoggingIn(false);
+    }
   };
 
-  // ── Loading state (resolving persisted session) ──
-  if (!authChecked) {
+  // Auth loading
+  if (isAuthLoading) {
     return (
-      <div className="flex items-center justify-center py-32 text-[#4F46E5] font-bold tracking-widest animate-pulse text-[11px] uppercase">
-        Initializing Secure Session…
+      <div className="flex h-64 items-center justify-center">
+        <div className="w-7 h-7 border-2 border-indigo-400 border-t-transparent rounded-full animate-spin" />
       </div>
     );
   }
 
-  // ── Unauthenticated ──
+  // Login screen
   if (!isAuthenticated) {
-    return <LoginScreen />;
+    return (
+      <motion.div
+        initial={{ opacity: 0, y: 16 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ duration: 0.4 }}
+        className="flex items-center justify-center min-h-[70vh] px-4"
+      >
+        <div className="w-full max-w-sm">
+          <div className="text-center mb-8">
+            <div className="inline-flex items-center justify-center w-14 h-14 bg-indigo-50 border border-indigo-100 rounded-2xl mb-4">
+              <span className="text-2xl select-none">🔐</span>
+            </div>
+            <h2 className="text-2xl font-bold text-zinc-900 tracking-tight">Admin Console</h2>
+            <p className="text-zinc-500 text-sm font-medium mt-1">Windchill Exam Administration</p>
+          </div>
+
+          <div className="bg-white border border-zinc-100 rounded-3xl shadow-sm p-8">
+            <form onSubmit={handleLogin} className="space-y-4">
+              <div>
+                <label className="block text-[10px] font-semibold text-zinc-400 uppercase tracking-wider mb-1.5">
+                  Email Address
+                </label>
+                <input
+                  type="email"
+                  value={email}
+                  onChange={e => setEmail(e.target.value)}
+                  placeholder="admin@example.com"
+                  required
+                  className="w-full bg-zinc-50 border border-zinc-200 rounded-xl px-4 py-3 text-sm text-zinc-900 font-medium outline-none focus:ring-2 focus:ring-indigo-100 focus:border-indigo-400 transition-all placeholder:text-zinc-300"
+                />
+              </div>
+              <div>
+                <label className="block text-[10px] font-semibold text-zinc-400 uppercase tracking-wider mb-1.5">
+                  Password
+                </label>
+                <input
+                  type="password"
+                  value={password}
+                  onChange={e => setPassword(e.target.value)}
+                  placeholder="••••••••"
+                  required
+                  className="w-full bg-zinc-50 border border-zinc-200 rounded-xl px-4 py-3 text-sm text-zinc-900 font-medium outline-none focus:ring-2 focus:ring-indigo-100 focus:border-indigo-400 transition-all placeholder:text-zinc-300"
+                />
+              </div>
+
+              <AnimatePresence>
+                {loginError && (
+                  <motion.p
+                    initial={{ opacity: 0, height: 0 }}
+                    animate={{ opacity: 1, height: 'auto' }}
+                    exit={{ opacity: 0, height: 0 }}
+                    className="text-xs font-semibold text-red-500 text-center"
+                  >
+                    {loginError}
+                  </motion.p>
+                )}
+              </AnimatePresence>
+
+              <button
+                type="submit"
+                disabled={isLoggingIn}
+                className="w-full py-3 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white font-semibold text-sm tracking-wide shadow-sm shadow-indigo-100 transition-all disabled:opacity-60"
+              >
+                {isLoggingIn ? 'Signing in…' : 'Sign In →'}
+              </button>
+            </form>
+          </div>
+        </div>
+      </motion.div>
+    );
   }
 
-  // ── Authenticated Dashboard ──
+  // Authenticated view
   return (
     <motion.div
       initial={{ opacity: 0, y: 12 }}
       animate={{ opacity: 1, y: 0 }}
-      transition={{ duration: 0.35, ease: 'easeOut' }}
-      className="max-w-7xl mx-auto py-4 px-1"
+      transition={{ duration: 0.35 }}
+      className="max-w-7xl mx-auto py-4 px-2"
     >
-
-      {/* ── Dashboard Header Card ── */}
-      <div className="bg-[#1E293B] border border-[#334155] rounded-[2rem] p-6 md:p-8 shadow-2xl mb-6">
-
-        {/* Top row: identity + logout */}
-        <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 mb-8">
-          <div>
-            <div className="flex items-center gap-3 mb-2">
-              <span className="text-[10px] font-black uppercase tracking-[0.25em] text-[#4F46E5] bg-[#4F46E5]/10 border border-[#4F46E5]/30 px-3 py-1 rounded-lg">
-                Admin Console
-              </span>
-              <span className="text-[10px] font-black uppercase tracking-widest text-emerald-400 bg-emerald-400/10 border border-emerald-400/30 px-3 py-1 rounded-lg">
-                ● Live
-              </span>
-            </div>
-            <h1 className="text-2xl font-black text-white">Enterprise Control Panel</h1>
-            <p className="text-[#94A3B8] text-xs font-semibold mt-1">
-              Authenticated as&nbsp;
-              <span className="text-white font-bold">{userEmail}</span>
-            </p>
-          </div>
-
-          <button
-            onClick={handleLogout}
-            className="text-[10px] font-black uppercase tracking-widest text-[#94A3B8] border border-[#334155] hover:border-red-500/40 hover:text-red-400 hover:bg-red-500/5 px-5 py-2.5 rounded-xl transition-all cursor-pointer"
-          >
-            🚪 Sign Out
-          </button>
+      {/* Header */}
+      <div className="flex items-center justify-between mb-6 flex-wrap gap-3">
+        <div>
+          <h1 className="text-2xl font-bold text-zinc-900 tracking-tight">Admin Command Center</h1>
+          <p className="text-sm text-zinc-500 font-medium mt-0.5">Exam Reports & Preset Management</p>
         </div>
-
-        {/* Tab strip */}
-        <div className="flex gap-1 border-b border-[#334155]">
-          {([
-            { key: 'reports' as const, icon: '📊', label: 'Exam Reports',    sub: 'Session logs & export'   },
-            { key: 'presets' as const, icon: '⚙️', label: 'Preset Manager',  sub: 'Build & push exam sets'  },
-          ]).map(tab => (
-            <button
-              key={tab.key}
-              onClick={() => setActiveTab(tab.key)}
-              className={`relative px-6 py-3.5 rounded-t-xl font-black text-[11px] uppercase tracking-widest transition-all cursor-pointer ${
-                activeTab === tab.key
-                  ? 'text-[#4F46E5] bg-[#4F46E5]/10 border border-b-0 border-[#4F46E5]/30 -mb-px'
-                  : 'text-[#94A3B8] hover:text-white hover:bg-white/5'
-              }`}
-            >
-              <span className="mr-1.5">{tab.icon}</span>
-              {tab.label}
-            </button>
-          ))}
-        </div>
+        <button
+          onClick={() => auth.signOut()}
+          className="text-xs font-semibold text-zinc-500 border border-zinc-200 hover:border-red-200 hover:text-red-500 hover:bg-red-50 px-4 py-2 rounded-full transition-all"
+        >
+          Sign Out
+        </button>
       </div>
 
-      {/* ── Tab Content ── */}
+      {/* Tab switcher */}
+      <div className="flex gap-1 bg-zinc-100 p-1 rounded-xl w-fit mb-6">
+        {([
+          { key: 'reports', label: 'Exam Reports' },
+          { key: 'presets', label: 'Preset Manager' },
+        ] as const).map(t => (
+          <button
+            key={t.key}
+            onClick={() => setActiveTab(t.key)}
+            className={`px-5 py-2 rounded-lg text-xs font-semibold transition-all ${
+              activeTab === t.key
+                ? 'bg-white text-indigo-600 shadow-sm'
+                : 'text-zinc-500 hover:text-zinc-700'
+            }`}
+          >
+            {t.label}
+          </button>
+        ))}
+      </div>
+
+      {/* Tab content */}
       <AnimatePresence mode="wait">
         <motion.div
           key={activeTab}
-          initial={{ opacity: 0, y: 8  }}
-          animate={{ opacity: 1, y: 0  }}
-          exit={{    opacity: 0, y: -8 }}
-          transition={{ duration: 0.2 }}
+          initial={{ opacity: 0, y: 8 }}
+          animate={{ opacity: 1, y: 0 }}
+          exit={{ opacity: 0, y: -8 }}
+          transition={{ duration: 0.18 }}
         >
           {activeTab === 'reports' ? <ReportsTab /> : <PresetsTab />}
         </motion.div>
       </AnimatePresence>
-
     </motion.div>
   );
 }

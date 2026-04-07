@@ -1,68 +1,126 @@
 // src/pages/Quiz.tsx
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
 import type { Question } from '../types/index';
 import { buildRandomExam } from '../utils/examLogic';
 
-const POOL_FILES = ['/data/windchill_mock_test_1.json'];
+// All 5 pool files — gracefully skips missing ones
+const POOL_FILES = [
+  '/data/windchill_mock_test_1.json',
+  '/data/windchill_mock_test_2.json',
+  '/data/windchill_mock_test_3.json',
+  '/data/windchill_mock_test_4.json',
+  '/data/windchill_mock_test_5.json',
+];
+
+// V1-parity time limits
+function getTimeLimit(count: number): number {
+  if (count <= 25) return 900;    // 15 min
+  if (count <= 50) return 2100;   // 35 min
+  if (count <= 75) return 3600;   // 60 min
+  return 4500;                     // 100Q = 75 min
+}
+
+// ── Difficulty pill ────────────────────────────────────────────────────────
+function DiffBadge({ level }: { level: string }) {
+  const styles: Record<string, string> = {
+    easy:   'bg-emerald-50 text-emerald-600 border-emerald-100',
+    medium: 'bg-amber-50  text-amber-600  border-amber-100',
+    hard:   'bg-red-50    text-red-600    border-red-100',
+  };
+  const cls = styles[level?.toLowerCase()] ?? 'bg-zinc-100 text-zinc-500 border-zinc-200';
+  return (
+    <span className={`text-[11px] font-medium border px-2.5 py-0.5 rounded-full ${cls}`}>
+      {level}
+    </span>
+  );
+}
 
 export default function Quiz() {
   const location = useLocation();
   const navigate = useNavigate();
-  const config = location.state;
+  const config   = location.state;
 
-  const [questions, setQuestions] = useState<Question[]>([]);
-  const [currentIdx, setCurrentIdx] = useState(0);
-  const [answers, setAnswers] = useState<Record<number, number | number[]>>({});
-  const [flagged, setFlagged] = useState<Record<number, boolean>>({});
-  const [timeLeft, setTimeLeft] = useState(0);
-  const [isLoaded, setIsLoaded] = useState(false);
+  const [questions,   setQuestions]   = useState<Question[]>([]);
+  const [currentIdx,  setCurrentIdx]  = useState(0);
+  const [answers,     setAnswers]     = useState<Record<number, number | number[]>>({});
+  const [flagged,     setFlagged]     = useState<Record<number, boolean>>({});
+  const [timeLeft,    setTimeLeft]    = useState(0);
+  const [isLoaded,    setIsLoaded]    = useState(false);
 
+  const hasSubmitted = useRef(false);
+
+  // ── Load questions ─────────────────────────────────────────────────────────
   useEffect(() => {
     if (!config) { navigate('/'); return; }
-    const initExam = async () => {
-      const requests = POOL_FILES.map(f => fetch(f).then(res => res.json()));
-      const rawPool = (await Promise.all(requests)).flat();
-      const finalSet = config.mode === 'preset' 
-        ? rawPool.slice(0, config.targetCount) // Note: Replace with actual preset logic if fetching from DB
-        : buildRandomExam(rawPool, config.targetCount);
-      
+
+    const init = async () => {
+      const requests = POOL_FILES.map(f =>
+        fetch(f).then(r => r.ok ? r.json() : []).catch(() => [])
+      );
+      const rawPool: Question[] = (await Promise.all(requests)).flat();
+
+      let finalSet: Question[];
+
+      if (config.mode === 'preset' && Array.isArray(config.presetQuestionIds)) {
+        // ✅ V1 FIX: filter pool by preset IDs, then shuffle so order isn't predictable
+        const idSet = new Set<number>(config.presetQuestionIds);
+        const matched = rawPool.filter(q => idSet.has(q.id));
+        finalSet = matched.sort(() => Math.random() - 0.5);
+      } else {
+        finalSet = buildRandomExam(rawPool, config.targetCount);
+      }
+
       setQuestions(finalSet);
-      setTimeLeft(config.targetCount * 60); 
+      setTimeLeft(getTimeLimit(config.targetCount));
       setIsLoaded(true);
     };
-    initExam();
-  }, [config, navigate]);
 
+    init();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // ── Countdown timer + auto-submit on timeout ──────────────────────────────
   useEffect(() => {
-    if (!isLoaded || timeLeft <= 0) return;
-    const timer = setInterval(() => setTimeLeft(prev => prev - 1), 1000);
+    if (!isLoaded) return;
+
+    if (timeLeft <= 0) {
+      // Auto-submit when time expires
+      if (!hasSubmitted.current) {
+        hasSubmitted.current = true;
+        navigate('/results', {
+          state: {
+            questions,
+            answers,
+            timeTaken:    getTimeLimit(config.targetCount),
+            examineeName: config.examineeName,
+            examMode:     config.mode,
+          },
+        });
+      }
+      return;
+    }
+
+    const timer = setInterval(() => setTimeLeft(p => p - 1), 1000);
     return () => clearInterval(timer);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isLoaded, timeLeft]);
 
-  const handleSubmitEarly = () => {
-    if (confirm(`Are you sure you want to submit early?\nYou have answered ${Object.keys(answers).length} of ${questions.length} questions.`)) {
-      navigate('/results', { state: { questions, answers, timeTaken: config.targetCount * 60 - timeLeft } });
-    }
-  };
-
-  if (!isLoaded) return <div className="flex h-screen items-center justify-center text-[#4F46E5] font-bold text-xl">Loading Exam Data...</div>;
-
-  const q = questions[currentIdx];
-  const isMulti = Array.isArray(q.correctAnswer);
-
-  const handleOptionClick = (idx: number) => {
-    setAnswers(prev => {
-      const current = prev[currentIdx];
-      if (isMulti) {
-        const arr = Array.isArray(current) ? [...current] : [];
-        const exists = arr.indexOf(idx);
-        if (exists > -1) arr.splice(exists, 1);
-        else arr.push(idx);
-        return { ...prev, [currentIdx]: arr };
-      }
-      return { ...prev, [currentIdx]: idx };
+  // ── Manual submit ──────────────────────────────────────────────────────────
+  const submitExam = () => {
+    const answered = Object.keys(answers).length;
+    if (!confirm(`Ready to submit?\n\nAnswered: ${answered} / ${questions.length}\nUnanswered: ${questions.length - answered}`)) return;
+    if (hasSubmitted.current) return;
+    hasSubmitted.current = true;
+    navigate('/results', {
+      state: {
+        questions,
+        answers,
+        timeTaken:    getTimeLimit(config.targetCount) - timeLeft,
+        examineeName: config.examineeName,
+        examMode:     config.mode,
+      },
     });
   };
 
@@ -71,126 +129,205 @@ export default function Quiz() {
     return Array.isArray(val) ? val.length > 0 : val !== undefined;
   };
 
+  const handleOptionClick = (i: number) => {
+    const q = questions[currentIdx];
+    setAnswers(prev => {
+      if (Array.isArray(q.correctAnswer)) {
+        const arr = Array.isArray(prev[currentIdx]) ? [...(prev[currentIdx] as number[])] : [];
+        const pos = arr.indexOf(i);
+        pos > -1 ? arr.splice(pos, 1) : arr.push(i);
+        return { ...prev, [currentIdx]: arr };
+      }
+      return { ...prev, [currentIdx]: i };
+    });
+  };
+
+  // ── Loading state ──────────────────────────────────────────────────────────
+  if (!isLoaded) {
+    return (
+      <div className="flex h-64 items-center justify-center">
+        <div className="text-center">
+          <div className="w-8 h-8 border-2 border-indigo-400 border-t-transparent rounded-full animate-spin mx-auto mb-3" />
+          <p className="text-sm font-medium text-zinc-500">Compiling your exam…</p>
+        </div>
+      </div>
+    );
+  }
+
+  const q        = questions[currentIdx];
+  const isMulti  = Array.isArray(q.correctAnswer);
+  const mins     = Math.floor(timeLeft / 60);
+  const secs     = String(timeLeft % 60).padStart(2, '0');
+  const isUrgent = timeLeft < 300;
+  const progress = ((currentIdx + 1) / questions.length) * 100;
+
   return (
-    <div className="flex flex-col lg:flex-row gap-8 w-full max-w-7xl mx-auto py-4">
-      
-      {/* LEFT: Question Navigator */}
-      <aside className="w-full lg:w-72 flex-shrink-0">
-        <div className="bg-[#1E293B] border border-[#334155] rounded-2xl p-6 sticky top-24">
-          <h3 className="text-xs font-bold text-[#94A3B8] uppercase tracking-widest mb-6">Question Navigator</h3>
-          <div className="grid grid-cols-5 gap-2">
+    <div className="flex flex-col lg:flex-row gap-5 w-full max-w-7xl mx-auto py-2">
+
+      {/* ── Navigator Sidebar ── */}
+      <aside className="w-full lg:w-60 flex-shrink-0">
+        <div className="bg-white border border-zinc-100 rounded-2xl p-5 shadow-sm sticky top-20">
+
+          {/* Timer */}
+          <div className={`flex items-center justify-center gap-2 rounded-xl px-4 py-3 mb-5 transition-colors ${
+            isUrgent ? 'bg-red-50 border border-red-100' : 'bg-zinc-50 border border-zinc-100'
+          }`}>
+            <span className="text-sm select-none">⏱</span>
+            <span className={`font-mono text-xl font-bold tabular-nums tracking-tight ${
+              isUrgent ? 'text-red-500 animate-pulse' : 'text-zinc-800'
+            }`}>
+              {mins}:{secs}
+            </span>
+          </div>
+
+          {/* Grid */}
+          <p className="text-[10px] font-semibold text-zinc-400 uppercase tracking-wider mb-2">Navigator</p>
+          <div className="grid grid-cols-5 gap-1 mb-5">
             {questions.map((_, i) => (
               <button
                 key={i}
                 onClick={() => setCurrentIdx(i)}
-                className={`h-10 rounded-lg text-xs font-bold transition-all border-2 
-                  ${currentIdx === i ? 'border-[#4F46E5] bg-[#4F46E5]/20 text-white' : 
-                    isAnswered(i) ? 'border-[#334155] bg-[#334155] text-white' : 
-                    'border-[#334155] hover:border-[#94A3B8] text-[#94A3B8]'}
-                  ${flagged[i] ? 'ring-2 ring-yellow-500 ring-offset-2 ring-offset-[#0F172A]' : ''}`}
+                className={`h-8 rounded-lg text-[11px] font-semibold transition-all ${
+                  i === currentIdx
+                    ? 'bg-indigo-600 text-white shadow-sm'
+                    : isAnswered(i)
+                    ? 'bg-zinc-200 text-zinc-600'
+                    : 'bg-zinc-50 border border-zinc-200 text-zinc-400 hover:border-indigo-300'
+                } ${flagged[i] ? 'ring-2 ring-amber-400 ring-offset-1' : ''}`}
               >
                 {i + 1}
               </button>
             ))}
           </div>
-          <div className="mt-8 flex flex-col gap-3">
-             <div className="flex items-center gap-2 text-[10px] uppercase font-bold text-[#94A3B8]">
-                <div className="w-2 h-2 rounded-full bg-[#334155]" /> Answered
-             </div>
-             <div className="flex items-center gap-2 text-[10px] uppercase font-bold text-[#94A3B8]">
-                <div className="w-2 h-2 rounded-full bg-[#4F46E5]" /> Current
-             </div>
-             <div className="flex items-center gap-2 text-[10px] uppercase font-bold text-[#94A3B8]">
-                <div className="w-2 h-2 rounded-full bg-yellow-500" /> Flagged
-             </div>
+
+          {/* Legend */}
+          <div className="space-y-1 text-[10px] text-zinc-400 font-medium border-t border-zinc-100 pt-3 mb-4">
+            {[
+              { cls: 'bg-indigo-600 rounded', label: 'Current' },
+              { cls: 'bg-zinc-200 rounded',   label: 'Answered' },
+              { cls: 'ring-2 ring-amber-400 ring-offset-1 rounded bg-zinc-50 border border-zinc-200', label: 'Flagged' },
+            ].map(l => (
+              <div key={l.label} className="flex items-center gap-2">
+                <span className={`w-3 h-3 inline-block flex-shrink-0 ${l.cls}`} />
+                {l.label}
+              </div>
+            ))}
           </div>
+
+          {/* Submit */}
+          <button
+            onClick={submitExam}
+            className="w-full py-2.5 rounded-xl bg-red-50 border border-red-100 text-red-500 text-xs font-semibold hover:bg-red-100 transition-colors"
+          >
+            Submit Exam
+          </button>
         </div>
       </aside>
 
-      {/* RIGHT: Main Question Area */}
-      <main className="flex-grow">
-        <div className="flex justify-between items-center mb-6 bg-[#1E293B] p-4 rounded-2xl border border-[#334155]">
-           <div className="flex gap-4 items-center">
-             <div className="bg-[#0F172A] border border-[#334155] px-4 py-2 rounded-xl">
-                <span className="text-[#94A3B8] text-xs font-bold mr-2 uppercase">Time Remaining</span>
-                <span className={`font-mono text-xl font-black ${timeLeft < 300 ? 'text-red-400 animate-pulse' : 'text-white'}`}>
-                  {Math.floor(timeLeft / 60)}:{String(timeLeft % 60).padStart(2, '0')}
-                </span>
-             </div>
-             <button 
-              onClick={() => setFlagged(prev => ({...prev, [currentIdx]: !prev[currentIdx]}))}
-              className={`px-4 py-2 rounded-xl text-xs font-bold uppercase tracking-wide transition-all border-2
-              ${flagged[currentIdx] ? 'bg-yellow-500/10 border-yellow-500 text-yellow-500' : 'border-[#334155] text-[#94A3B8] hover:border-yellow-500/50'}`}
-             >
-               {flagged[currentIdx] ? '🚩 Flagged' : '⚑ Flag for Review'}
-             </button>
-           </div>
-
-           {/* PERSISTENT SUBMIT BUTTON */}
-           <button 
-             onClick={handleSubmitEarly}
-             className="bg-red-500/10 border border-red-500/50 text-red-400 hover:bg-red-500 hover:text-white px-5 py-2.5 rounded-xl font-bold uppercase text-xs tracking-wider transition-colors"
-           >
-             Submit Exam
-           </button>
+      {/* ── Main Question Area ── */}
+      <main className="flex-grow min-w-0">
+        {/* Progress bar */}
+        <div className="mb-4 bg-zinc-100 rounded-full h-1 overflow-hidden">
+          <div
+            className="h-full bg-indigo-500 rounded-full transition-all duration-500"
+            style={{ width: `${progress}%` }}
+          />
         </div>
 
         <AnimatePresence mode="wait">
           <motion.div
             key={currentIdx}
-            initial={{ opacity: 0, y: 10 }}
+            initial={{ opacity: 0, y: 8 }}
             animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: -10 }}
-            className="bg-[#1E293B] border border-[#334155] rounded-[2rem] p-8 md:p-12 shadow-2xl"
+            exit={{ opacity: 0, y: -8 }}
+            transition={{ duration: 0.18 }}
+            className="bg-white border border-zinc-100 rounded-3xl p-7 md:p-10 shadow-sm"
           >
-            <div className="flex items-center gap-4 mb-8">
-              <span className="text-xl font-black text-[#94A3B8]">Question {currentIdx + 1} of {questions.length}</span>
-              <div className="h-px flex-grow bg-[#334155]" />
-              <span className="text-[10px] font-bold bg-[#0F172A] border border-[#334155] text-[#94A3B8] px-3 py-1 rounded-md uppercase">{q.topic}</span>
-              <span className="text-[10px] font-bold bg-[#0F172A] border border-[#334155] text-[#94A3B8] px-3 py-1 rounded-md uppercase">{q.difficulty}</span>
-              {isMulti && <span className="bg-[#4F46E5]/20 text-[#4F46E5] text-[10px] font-bold px-3 py-1 rounded-md border border-[#4F46E5]/30 uppercase">Select Multiple</span>}
+            {/* Meta row */}
+            <div className="flex items-center flex-wrap gap-2 mb-6">
+              <span className="text-xs font-semibold text-zinc-400">
+                Q {currentIdx + 1} <span className="text-zinc-300">/</span> {questions.length}
+              </span>
+              <div className="h-3 w-px bg-zinc-200" />
+              <span className="text-[11px] font-medium bg-zinc-100 text-zinc-600 px-2.5 py-0.5 rounded-full">
+                {q.topic}
+              </span>
+              <DiffBadge level={q.difficulty} />
+              {isMulti && (
+                <span className="text-[11px] font-medium bg-indigo-50 text-indigo-600 border border-indigo-100 px-2.5 py-0.5 rounded-full">
+                  Select Multiple
+                </span>
+              )}
+              <button
+                onClick={() => setFlagged(prev => ({ ...prev, [currentIdx]: !prev[currentIdx] }))}
+                className={`ml-auto text-[11px] font-semibold px-3 py-1 rounded-full border transition-all ${
+                  flagged[currentIdx]
+                    ? 'bg-amber-50 border-amber-200 text-amber-600'
+                    : 'border-zinc-200 text-zinc-400 hover:border-amber-300 hover:text-amber-500'
+                }`}
+              >
+                {flagged[currentIdx] ? '🚩 Flagged' : '⚑ Flag'}
+              </button>
             </div>
 
-            <h2 className="text-2xl font-bold text-white mb-10 leading-snug">
+            {/* Question text */}
+            <h2 className="text-lg font-semibold text-zinc-900 mb-7 leading-relaxed">
               {q.question}
             </h2>
 
-            <div className="space-y-4">
+            {/* Options */}
+            <div className="space-y-3">
               {q.options.map((opt, i) => {
-                const selected = isMulti ? (answers[currentIdx] as number[] || []).includes(i) : answers[currentIdx] === i;
+                const sel = isMulti
+                  ? (answers[currentIdx] as number[] ?? []).includes(i)
+                  : answers[currentIdx] === i;
                 return (
                   <button
                     key={i}
                     onClick={() => handleOptionClick(i)}
-                    className={`w-full group flex items-center p-5 rounded-2xl border-2 transition-all text-left
-                    ${selected ? 'border-[#4F46E5] bg-[#4F46E5]/10' : 'border-[#334155] hover:border-[#94A3B8] bg-[#0F172A]'}`}
+                    className={`w-full flex items-center gap-4 p-4 rounded-2xl border-2 text-left transition-all ${
+                      sel
+                        ? 'border-indigo-400 bg-indigo-50'
+                        : 'border-zinc-100 bg-zinc-50 hover:border-indigo-200 hover:bg-indigo-50/40'
+                    }`}
                   >
-                    <div className={`w-10 h-10 rounded-xl flex items-center justify-center font-bold mr-6 transition-all
-                    ${selected ? 'bg-[#4F46E5] text-white' : 'bg-[#1E293B] border border-[#334155] text-[#94A3B8] group-hover:text-white'}`}>
+                    <span className={`w-9 h-9 flex-shrink-0 rounded-xl flex items-center justify-center text-sm font-bold transition-all ${
+                      sel
+                        ? 'bg-indigo-600 text-white'
+                        : 'bg-white border border-zinc-200 text-zinc-500'
+                    }`}>
                       {String.fromCharCode(65 + i)}
-                    </div>
-                    <span className={`text-base font-medium ${selected ? 'text-white' : 'text-[#94A3B8] group-hover:text-white'}`}>{opt}</span>
+                    </span>
+                    <span className={`text-sm font-medium leading-snug ${
+                      sel ? 'text-indigo-900' : 'text-zinc-700'
+                    }`}>
+                      {opt}
+                    </span>
                   </button>
                 );
               })}
             </div>
 
-            <div className="mt-12 flex justify-between gap-4 border-t border-[#334155] pt-8">
-               <button 
-                onClick={() => setCurrentIdx(prev => Math.max(0, prev - 1))}
+            {/* Navigation row */}
+            <div className="mt-8 flex items-center justify-between border-t border-zinc-100 pt-6">
+              <button
+                onClick={() => setCurrentIdx(p => Math.max(0, p - 1))}
                 disabled={currentIdx === 0}
-                className="px-8 py-4 rounded-xl font-bold text-[#94A3B8] uppercase tracking-widest text-xs hover:text-white disabled:opacity-30 transition-colors"
-               >
-                 ← Previous
-               </button>
-               <button 
-                onClick={() => {
-                  if (currentIdx < questions.length - 1) setCurrentIdx(prev => prev + 1);
-                  else if (confirm("Ready to submit your final exam?")) navigate('/results', { state: { questions, answers, timeTaken: config.targetCount * 60 - timeLeft } });
-                }}
-                className="bg-[#4F46E5] text-white px-10 py-4 rounded-xl font-bold uppercase tracking-widest text-xs hover:bg-[#4338CA] shadow-lg transition-all"
+                className="px-5 py-2.5 rounded-xl text-sm font-semibold text-zinc-500 border border-zinc-200 hover:border-zinc-300 hover:text-zinc-700 disabled:opacity-30 transition-all"
               >
-                {currentIdx === questions.length - 1 ? 'Finish Exam' : 'Next Question →'}
+                ← Previous
+              </button>
+              <span className="text-xs text-zinc-400 font-medium hidden sm:block">
+                {Object.keys(answers).length} of {questions.length} answered
+              </span>
+              <button
+                onClick={() => {
+                  if (currentIdx < questions.length - 1) setCurrentIdx(p => p + 1);
+                  else submitExam();
+                }}
+                className="px-8 py-2.5 rounded-xl text-sm font-semibold bg-indigo-600 hover:bg-indigo-700 text-white shadow-sm transition-all"
+              >
+                {currentIdx === questions.length - 1 ? 'Finish →' : 'Next →'}
               </button>
             </div>
           </motion.div>

@@ -8,31 +8,39 @@ import Admin from './pages/Admin';
 function App() {
   return (
     <Router>
-      <div className="min-h-screen bg-[#0F172A] text-[#F8FAFC] flex flex-col items-center font-sans">
-        
-        <header className="w-full bg-[#334155]/75 backdrop-blur-xl border-b border-[#475569] p-4 sticky top-0 z-50">
+      <div className="min-h-screen bg-zinc-50 text-zinc-900 flex flex-col items-center font-sans">
+
+        {/* iOS-style translucent sticky nav */}
+        <header className="w-full bg-white/80 backdrop-blur-xl border-b border-zinc-200/80 px-6 py-3 sticky top-0 z-50">
           <div className="max-w-7xl mx-auto flex items-center justify-between">
-            <div className="flex items-center gap-4">
-              <img src="/images/ptc_logo.png" alt="PTC" className="h-10 bg-white p-1 rounded shadow-sm" />
-              <div className="h-6 w-px bg-[#475569]"></div>
-              <img src="/images/plural_logo.jpg" alt="Plural" className="h-10 bg-white p-1 rounded shadow-sm" />
+            <div className="flex items-center gap-3">
+              <img
+                src="/images/ptc_logo.png"
+                alt="PTC"
+                className="h-9 object-contain bg-white rounded-lg border border-zinc-100 shadow-sm p-1"
+              />
+              <div className="h-5 w-px bg-zinc-200" />
+              <img
+                src="/images/plural_logo.jpg"
+                alt="Plural Technology"
+                className="h-9 object-contain bg-white rounded-lg border border-zinc-100 shadow-sm p-1"
+              />
             </div>
-            <div className="hidden md:block">
-              <span className="text-[10px] font-black uppercase tracking-[0.2em] text-[#94A3B8] border border-[#334155] px-3 py-1 rounded-md">
-                Implementation Practitioner Mock Exam
-              </span>
-            </div>
+            <span className="hidden md:inline-block text-[10px] font-semibold uppercase tracking-widest text-zinc-400 border border-zinc-200 bg-zinc-50 px-3 py-1.5 rounded-full">
+              Implementation Practitioner Mock Exam
+            </span>
           </div>
         </header>
 
-        <main className="w-full max-w-7xl p-6 flex-grow flex flex-col">
+        <main className="w-full max-w-7xl px-4 py-6 flex-grow flex flex-col">
           <Routes>
-            <Route path="/" element={<Welcome />} />
-            <Route path="/quiz" element={<Quiz />} />
+            <Route path="/"        element={<Welcome />} />
+            <Route path="/quiz"    element={<Quiz />} />
             <Route path="/results" element={<Results />} />
-            <Route path="/admin" element={<Admin />} />
+            <Route path="/admin"   element={<Admin />} />
           </Routes>
         </main>
+
       </div>
     </Router>
   );
